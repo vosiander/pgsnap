@@ -1,0 +1,77 @@
+version: '3'
+
+dotenv:
+  - .env
+
+tasks:
+  build:
+    desc: Build pgsnap binary
+    cmds:
+      - go build -o pgsnap .
+
+  install:
+    desc: Install pgsnap to $GOPATH/bin
+    cmds:
+      - go install .
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -f pgsnap
+      - rm -rf .backup
+
+  deps:
+    desc: Download dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  fmt:
+    desc: Format code
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  run:backup:
+    desc: Run backup command (requires APP env var)
+    cmds:
+      - go run ./cmd/pgsnap backup {{.APP}} --image postgres:17-alpine
+
+  run:cronbackup:
+    desc: Run cronbackup command (requires APP env var)
+    cmds:
+      - go run ./cmd/pgsnap cronbackup {{.APP}} --image postgres:17-alpine --schedule "0 2 * * *"
+
+  run:restore:
+    desc: Run restore command (requires APP and FILE env vars)
+    cmds:
+      - go run ./cmd/pgsnap restore {{.APP}} --file {{.FILE}} --image postgres:17-alpine
+
+  run:list:
+    desc: Run list command (requires APP env var)
+    cmds:
+      - go run ./cmd/pgsnap list {{.APP}}
+
+  run:info:
+    desc: Run info command (requires APP env var)
+    cmds:
+      - go run ./cmd/pgsnap info {{.APP}}
+
+  help:
+    desc: Show pgsnap help
+    cmds:
+      - go run ./cmd/pgsnap --help
+
+  leak:
+    desc: Check for secrets and sensitive data
+    cmds:
+      - gitleaks detect --source . -v

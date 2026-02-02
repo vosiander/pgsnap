@@ -1,0 +1,71 @@
+version: 2
+
+project_name: pgsnap
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pgsnap
+    main: ./cmd/pgsnap
+    binary: pgsnap
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/vosiander/pgsnap/cmd/pgsnap/cmd.version={{.Version}}
+      - -X github.com/vosiander/pgsnap/cmd/pgsnap/cmd.commit={{.Commit}}
+      - -X github.com/vosiander/pgsnap/cmd/pgsnap/cmd.date={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: pgsnap
+    repository:
+      owner: vosiander
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/vosiander/pgsnap"
+    description: "PostgreSQL backup and restore tool for Kubernetes"
+    license: "MIT"
+    install: |
+      bin.install "pgsnap"
+    test: |
+      system "#{bin}/pgsnap", "--version"
+
+release:
+  github:
+    owner: vosiander
+    name: pgsnap
+  draft: false
+  prerelease: auto
+  name_template: "{{.Tag}}"
