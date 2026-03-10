@@ -21,6 +21,8 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+const maxSQLConfigMapBytes = 1024 * 1024
+
 // BackupJob represents a Kubernetes Job for database backup
 type BackupJob struct {
 	client    *kubernetes.Clientset
@@ -277,6 +279,11 @@ type RestoreJob struct {
 	dbConfig  *postgres.DBConfig
 }
 
+// Name returns the job name
+func (r *RestoreJob) Name() string {
+	return r.name
+}
+
 // CreateRestoreJob creates a Kubernetes Job that runs psql to restore
 func CreateRestoreJob(ctx context.Context, client *kubernetes.Clientset, config *rest.Config, namespace string, dbConfig *postgres.DBConfig, backupData []byte, postgresImage string) (*RestoreJob, error) {
 	timestamp := time.Now().Format("20060102-150405")
@@ -470,6 +477,219 @@ func (r *RestoreJob) Cleanup(ctx context.Context) error {
 
 	// Delete ConfigMap
 	return r.client.CoreV1().ConfigMaps(r.namespace).Delete(ctx, r.configMap, metav1.DeleteOptions{})
+}
+
+// SQLJob represents a Kubernetes Job for ad hoc SQL execution.
+type SQLJob struct {
+	client    *kubernetes.Clientset
+	config    *rest.Config
+	namespace string
+	name      string
+	configMap string
+	dbConfig  *postgres.DBConfig
+}
+
+// Name returns the job name.
+func (s *SQLJob) Name() string {
+	return s.name
+}
+
+// ConfigMapName returns the SQL payload ConfigMap name.
+func (s *SQLJob) ConfigMapName() string {
+	return s.configMap
+}
+
+// CreateSQLJob creates a Kubernetes Job that runs SQL with psql.
+func CreateSQLJob(ctx context.Context, client *kubernetes.Clientset, config *rest.Config, namespace string, dbConfig *postgres.DBConfig, sqlData []byte, postgresImage string) (*SQLJob, error) {
+	if len(sqlData) > maxSQLConfigMapBytes {
+		return nil, fmt.Errorf("sql payload exceeds Kubernetes ConfigMap limit (%d bytes)", maxSQLConfigMapBytes)
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	jobName := fmt.Sprintf("pgsnap-sql-%s", timestamp)
+	configMapName := fmt.Sprintf("pgsnap-sql-data-%s", timestamp)
+
+	configMap, job := buildSQLJobResources(namespace, dbConfig, sqlData, postgresImage, jobName, configMapName)
+
+	_, err := client.CoreV1().ConfigMaps(namespace).Create(ctx, configMap, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ConfigMap: %w", err)
+	}
+
+	createdJob, err := client.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		client.CoreV1().ConfigMaps(namespace).Delete(ctx, configMapName, metav1.DeleteOptions{})
+		return nil, fmt.Errorf("failed to create SQL job: %w", err)
+	}
+
+	return &SQLJob{
+		client:    client,
+		config:    config,
+		namespace: namespace,
+		name:      createdJob.Name,
+		configMap: configMapName,
+		dbConfig:  dbConfig,
+	}, nil
+}
+
+// WaitForCompletion waits for the SQL Job to complete.
+func (s *SQLJob) WaitForCompletion(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for SQL job to complete")
+		case <-ticker.C:
+			job, err := s.client.BatchV1().Jobs(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to get job status: %w", err)
+			}
+
+			if job.Status.Succeeded > 0 {
+				return nil
+			}
+
+			if job.Status.Failed > 0 {
+				return common.ErrSQLFailed
+			}
+		}
+	}
+}
+
+// GetPod returns the pod created by this Job.
+func (s *SQLJob) GetPod(ctx context.Context) (*corev1.Pod, error) {
+	pods, err := s.client.CoreV1().Pods(s.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", s.name),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(pods.Items) == 0 {
+		return nil, fmt.Errorf("no pod found for job %s", s.name)
+	}
+
+	return &pods.Items[0], nil
+}
+
+// GetPodLogs retrieves logs from the SQL job pod.
+func (s *SQLJob) GetPodLogs(ctx context.Context) (string, error) {
+	pod, err := s.GetPod(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	req := s.client.CoreV1().Pods(s.namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: "pg-sql",
+	})
+
+	logs, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer logs.Close()
+
+	buf := new(bytes.Buffer)
+	_, err = io.Copy(buf, logs)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
+// Cleanup deletes the Job, ConfigMap, and associated resources.
+func (s *SQLJob) Cleanup(ctx context.Context) error {
+	deletePolicy := metav1.DeletePropagationForeground
+
+	if err := s.client.BatchV1().Jobs(s.namespace).Delete(ctx, s.name, metav1.DeleteOptions{
+		PropagationPolicy: &deletePolicy,
+	}); err != nil {
+		return err
+	}
+
+	return s.client.CoreV1().ConfigMaps(s.namespace).Delete(ctx, s.configMap, metav1.DeleteOptions{})
+}
+
+func buildSQLJobResources(namespace string, dbConfig *postgres.DBConfig, sqlData []byte, postgresImage, jobName, configMapName string) (*corev1.ConfigMap, *batchv1.Job) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":       "pgsnap",
+				"operation": "sql",
+			},
+		},
+		BinaryData: map[string][]byte{
+			"query.sql": sqlData,
+		},
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":       "pgsnap",
+				"operation": "sql",
+			},
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: int32Ptr(0),
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":       "pgsnap",
+						"operation": "sql",
+					},
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:    "pg-sql",
+							Image:   postgresImage,
+							Command: []string{"psql"},
+							Args: []string{
+								fmt.Sprintf("--host=%s", dbConfig.Host),
+								fmt.Sprintf("--port=%d", dbConfig.Port),
+								fmt.Sprintf("--username=%s", dbConfig.User),
+								fmt.Sprintf("--dbname=%s", dbConfig.Database),
+								"-v", "ON_ERROR_STOP=1",
+								"--file=/sql/query.sql",
+							},
+							Env: []corev1.EnvVar{
+								{Name: "PGPASSWORD", Value: dbConfig.Password},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "sql", MountPath: "/sql"},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "sql",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: configMapName,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return configMap, job
 }
 
 // Helper functions

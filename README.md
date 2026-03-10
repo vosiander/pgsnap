@@ -8,6 +8,7 @@ A CLI tool for backing up and restoring PostgreSQL databases running in Kubernet
 - 🔐 **Smart Config Extraction** - Reads database credentials from environment variables
 - 📦 **Compression** - Automatically compresses backups with zip
 - ☁️ **S3 Upload** - Optional upload to S3/MinIO after backup
+- 🧪 **In-Cluster SQL Jobs** - Run ad hoc SQL and inspect results via Kubernetes Job logs
 - 🛡️ **Safety** - Interactive confirmation prompts for restores
 - 🎯 **Generic** - Works with any Kubernetes app using PostgreSQL
 
@@ -69,6 +70,16 @@ pgsnap restore yamtrack --file .backup/yamtrack-2026-01-11-backup.zip
 
 # Force restore without prompt
 pgsnap restore yamtrack --file backup.zip --force
+```
+
+### SQL
+
+```bash
+# List databases
+pgsnap sql yamtrack --sql "SELECT datname FROM pg_database;"
+
+# Inspect table rows
+pgsnap sql yamtrack --sql "SELECT * FROM users LIMIT 20;"
 ```
 
 ### List Backups
@@ -161,6 +172,35 @@ pgsnap list yamtrack
 
 # List backups in custom directory
 pgsnap list yamtrack --output /path/to/backups
+```
+
+### SQL Command
+
+```bash
+pgsnap sql <app-identifier> [--sql "SELECT 1"] [--file query.sql]
+```
+
+Runs SQL in a Kubernetes Job using the discovered database configuration. The Job and SQL ConfigMap are preserved after execution so you can inspect output with `kubectl logs`.
+
+**Flags:**
+- `--sql` - Inline SQL to execute
+- `--file, -f` - Path to a SQL file to execute
+- `--image` - PostgreSQL container image (default: `postgres:16-alpine`)
+- `--job-timeout` - Timeout in seconds to wait for Job completion (default: `300`)
+
+**Examples:**
+```bash
+# List databases
+pgsnap sql yamtrack --sql "SELECT datname FROM pg_database;"
+
+# Inspect table data
+pgsnap sql yamtrack --sql "SELECT id, email FROM users LIMIT 20;"
+
+# Run a SQL script
+pgsnap sql yamtrack --file ./query.sql
+
+# Pipe SQL from stdin
+cat ./query.sql | pgsnap sql yamtrack
 ```
 
 ### Info Command
@@ -274,7 +314,7 @@ These variables are read by the pgsnap CLI tool itself:
 
 #### Pod Environment Variables (Database Detection)
 
-pgsnap automatically detects database configuration from pod environment variables. When you run `backup`, `restore`, or `info` commands, pgsnap reads these variables from the discovered pod:
+pgsnap automatically detects database configuration from pod environment variables. When you run `backup`, `restore`, `sql`, or `info` commands, pgsnap reads these variables from the discovered pod:
 
 **Full URL formats (parsed automatically):**
 - `DATABASE_URL` - Full PostgreSQL connection URL (e.g., `postgresql://user:pass@host:5432/dbname`)

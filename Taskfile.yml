@@ -54,7 +54,7 @@ tasks:
   run:restore:
     desc: Run restore command (requires APP and FILE env vars)
     cmds:
-      - go run ./cmd/pgsnap restore {{.APP}} --file {{.FILE}} --image postgres:17-alpine
+      - go run ./cmd/pgsnap restore {{.APP}} --file {{.FILE}}
 
   run:list:
     desc: Run list command (requires APP env var)

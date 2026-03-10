@@ -2,6 +2,7 @@ package archive
 
 import (
 	"archive/zip"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
@@ -95,4 +96,40 @@ func Decompress(zipPath, destFile string) error {
 	}
 
 	return nil
+}
+
+// DecompressGzip decompresses a gzip file and returns the content as bytes
+func DecompressGzip(gzipPath string) ([]byte, error) {
+	// Open gzip file
+	file, err := os.Open(gzipPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open gzip file: %w", err)
+	}
+	defer file.Close()
+
+	// Create gzip reader
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzipReader.Close()
+
+	// Read all content
+	content, err := io.ReadAll(gzipReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress gzip: %w", err)
+	}
+
+	return content, nil
+}
+
+// ReadFileContent reads a file (possibly compressed) and returns its content
+func ReadFileContent(filePath string) ([]byte, error) {
+	// Check file extension
+	if filepath.Ext(filePath) == ".gz" {
+		return DecompressGzip(filePath)
+	}
+
+	// Read plain file
+	return os.ReadFile(filePath)
 }

@@ -5,18 +5,21 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vosiander/pgsnap/pkg/archive"
 	"github.com/vosiander/pgsnap/pkg/k8s"
 	"github.com/vosiander/pgsnap/pkg/postgres"
+	"github.com/vosiander/pgsnap/pkg/storage"
 )
 
 var (
-	restoreFile  string
-	forceRestore bool
+	restoreFile       string
+	forceRestore      bool
+	restoreImage      string
+	restoreJobTimeout int
 )
 
 var restoreCmd = &cobra.Command{
@@ -27,20 +30,21 @@ var restoreCmd = &cobra.Command{
 The command will:
   1. Discover the application pod in Kubernetes
   2. Extract database connection info from environment variables
-  3. Extract the backup from zip file
-  4. Restore the database using psql
+  3. Create a Kubernetes Job that runs psql in the cluster
+  4. Upload the backup data to the cluster
+  5. Restore the database using psql
 
 WARNING: This will overwrite the current database!
 
 Examples:
   # Restore yamtrack database
-  pgsnap restore yamtrack --file .backup/yamtrack-2026-01-11-backup.zip
+  pgsnap restore yamtrack --file backups/backup-2026-01-11.sql.gz
 
   # Restore without confirmation prompt
-  pgsnap restore yamtrack --file backup.zip --force
+  pgsnap restore yamtrack --file backup.sql --force
 
   # Restore with specific pod
-  pgsnap restore --pod yamtrack-deployment-abc123 --file backup.zip`,
+  pgsnap restore --pod yamtrack-deployment-abc123 --file backup.sql`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runRestore,
 }
@@ -48,6 +52,8 @@ Examples:
 func init() {
 	restoreCmd.Flags().StringVarP(&restoreFile, "file", "f", "", "Backup file to restore (required)")
 	restoreCmd.Flags().BoolVar(&forceRestore, "force", false, "Skip confirmation prompt")
+	restoreCmd.Flags().StringVar(&restoreImage, "image", "postgres:16-alpine", "PostgreSQL container image")
+	restoreCmd.Flags().IntVar(&restoreJobTimeout, "job-timeout", 600, "Job timeout in seconds")
 	restoreCmd.MarkFlagRequired("file")
 
 	rootCmd.AddCommand(restoreCmd)
@@ -94,7 +100,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 
 	// Create Kubernetes client
 	fmt.Println("📦 Connecting to Kubernetes...")
-	client, _, defaultNamespace, err := k8s.NewClient(globalConfig.Kubeconfig, globalConfig.Context)
+	client, restConfig, defaultNamespace, err := k8s.NewClient(globalConfig.Kubeconfig, globalConfig.Context)
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
@@ -136,34 +142,31 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   User: %s\n", dbConfig.User)
 	fmt.Println()
 
-	// Extract backup file
-	fmt.Println("📦 Extracting backup...")
-	tmpDir := os.TempDir()
-	sqlFile := filepath.Join(tmpDir, "restore-temp.sql")
-
-	// Check if file is already SQL or needs decompression
-	if strings.HasSuffix(restoreFile, ".zip") {
-		if err := archive.Decompress(restoreFile, sqlFile); err != nil {
-			return fmt.Errorf("failed to extract backup: %w", err)
-		}
-		defer os.Remove(sqlFile) // Clean up temp file
-	} else {
-		// Assume it's already a SQL file
-		sqlFile = restoreFile
+	// Read backup file content
+	fmt.Println("📦 Reading backup file...")
+	backupData, err := archive.ReadFileContent(restoreFile)
+	if err != nil {
+		return fmt.Errorf("failed to read backup file: %w", err)
 	}
 
-	fmt.Println("   ✓ Backup extracted")
+	fmt.Printf("   ✓ Backup loaded (%s)\n", storage.FormatSize(int64(len(backupData))))
 	fmt.Println()
 
-	// Restore database
-	fmt.Println("♻️  Restoring database...")
-	restoreOpts := postgres.RestoreOptions{
-		PsqlPath:  globalConfig.PsqlPath,
-		InputFile: sqlFile,
-		DBConfig:  dbConfig,
+	// Create restore job in cluster
+	fmt.Println("🚀 Creating restore job in cluster...")
+	job, err := k8s.CreateRestoreJob(ctx, client, restConfig, globalConfig.Namespace, dbConfig, backupData, restoreImage)
+	if err != nil {
+		return fmt.Errorf("failed to create restore job: %w", err)
 	}
+	defer job.Cleanup(ctx)
 
-	if err := postgres.Restore(restoreOpts); err != nil {
+	fmt.Printf("   Job created: %s\n", job.Name())
+	fmt.Println()
+
+	// Wait for job completion
+	fmt.Println("⏳ Waiting for restore job to complete...")
+	timeout := time.Duration(restoreJobTimeout) * time.Second
+	if err := job.WaitForCompletion(ctx, timeout); err != nil {
 		return fmt.Errorf("restore failed: %w", err)
 	}
 

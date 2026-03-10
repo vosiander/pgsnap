@@ -9,6 +9,7 @@ var (
 	ErrNoDatabaseConfig   = errors.New("no database configuration found in pod environment")
 	ErrBackupFailed       = errors.New("backup failed")
 	ErrRestoreFailed      = errors.New("restore failed")
+	ErrSQLFailed          = errors.New("sql job failed")
 	ErrConnectionFailed   = errors.New("database connection failed")
 	ErrFileNotFound       = errors.New("backup file not found")
 	ErrInvalidBackupFile  = errors.New("invalid backup file")

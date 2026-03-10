@@ -32,6 +32,7 @@ database connection information from environment variables.
 Usage:
   pgsnap backup <app-identifier>
   pgsnap restore <app-identifier> --file <backup.zip>
+  pgsnap sql <app-identifier> --sql "SELECT 1"
   pgsnap list <app-identifier>
   pgsnap info <app-identifier>`,
 	Version: version,
