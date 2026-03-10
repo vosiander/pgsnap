@@ -18,7 +18,7 @@ A CLI tool for backing up and restoring PostgreSQL databases running in Kubernet
 
 ```bash
 brew tap vosiander/tap
-brew install pgsnap
+brew install --cask pgsnap
 ```
 
 ### Install Script
